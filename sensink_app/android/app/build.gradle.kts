@@ -17,16 +17,21 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // --- FIXED: The correct Kotlin DSL property name for desugaring ---
+        isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+    // --- FIXED: Updated to the new Kotlin compilerOptions format to remove the deprecation error ---
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     defaultConfig {
         // UPDATED: This must perfectly match your new Firebase App Package Name
         applicationId = "sensink_app_android.v1"
-        
+
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -46,4 +51,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // --- ADDED: The desugaring library dependency ---
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
 }

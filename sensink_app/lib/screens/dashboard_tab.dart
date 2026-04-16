@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../notification_service.dart';
 
 class DashboardTab extends StatefulWidget {
   const DashboardTab({Key? key}) : super(key: key);
@@ -14,18 +16,22 @@ class _DashboardTabState extends State<DashboardTab> {
   late final DatabaseReference _dbRef;
   final User? currentUser = FirebaseAuth.instance.currentUser;
 
+  final NotificationService _notificationService = NotificationService();
+
   bool isSystemOn = false;
   double? waterLevel;
   double? phLevel;
   double? flowRate;
   bool isAppConnected = false;
 
-  // Prevents logging when the app first opens
   bool _isFirstLoad = true;
+  bool _hasAlerted = false;
 
   @override
   void initState() {
     super.initState();
+    _setupNotifications();
+
     _dbRef = FirebaseDatabase.instanceFor(
       app: Firebase.app(),
       databaseURL: 'https://sensink-appdev-default-rtdb.asia-southeast1.firebasedatabase.app/',
@@ -33,30 +39,38 @@ class _DashboardTabState extends State<DashboardTab> {
     _activateRealtimeListeners();
   }
 
+  void _setupNotifications() async {
+    await _notificationService.init();
+    await Permission.notification.request();
+  }
+
   void _activateRealtimeListeners() {
     _dbRef.child('.info/connected').onValue.listen((event) {
       setState(() => isAppConnected = event.snapshot.value as bool? ?? false);
     });
 
-    // --- THE FIX: We log the history inside the listener instead of the button! ---
-    // This allows the app to catch ESP32 auto-shutoffs as long as the app is open
     _dbRef.child('sink_monitor/isPumpOn').onValue.listen((event) async {
       if (event.snapshot.value != null) {
         final val = event.snapshot.value;
         bool newPumpState = (val is bool) ? val : (val == 1);
 
-        // Do not generate a log when the app is just starting up
         if (_isFirstLoad) {
           setState(() => isSystemOn = newPumpState);
           _isFirstLoad = false;
           return;
         }
 
-        // If the state actually changed (either by you, or the ESP32)
         if (isSystemOn != newPumpState) {
           setState(() => isSystemOn = newPumpState);
 
-          // Get the EXACT water level directly from Firebase at this exact millisecond to prevent 0%
+          // --- ADDED: Send notification when the pump is turned ON ---
+          if (newPumpState == true) {
+            _notificationService.showWarningNotification(
+              '💧 Faucet Opened',
+              'The pump is on and water is now running.',
+            );
+          }
+
           DataSnapshot wlSnap = await _dbRef.child('sink_monitor/waterLevelPercent').get();
           double currentWl = double.tryParse(wlSnap.value?.toString() ?? '0') ?? 0.0;
 
@@ -64,7 +78,6 @@ class _DashboardTabState extends State<DashboardTab> {
           String timeString = "${now.hour > 12 ? now.hour - 12 : now.hour == 0 ? 12 : now.hour}:${now.minute.toString().padLeft(2, '0')} ${now.hour >= 12 ? 'PM' : 'AM'}";
           String dateString = "${now.month}/${now.day}/${now.year}";
 
-          // Push the log!
           _dbRef.child('sink_monitor/history').push().set({
             'action': newPumpState ? 'FAUCET OPENED' : 'FAUCET CLOSED',
             'date': dateString,
@@ -77,7 +90,24 @@ class _DashboardTabState extends State<DashboardTab> {
     });
 
     _dbRef.child('sink_monitor/waterLevelPercent').onValue.listen((event) {
-      if (event.snapshot.value != null) setState(() => waterLevel = double.tryParse(event.snapshot.value.toString()));
+      if (event.snapshot.value != null) {
+        double currentLevel = double.tryParse(event.snapshot.value.toString()) ?? 0.0;
+        setState(() => waterLevel = currentLevel);
+
+        if (currentLevel >= 90 && !_hasAlerted) {
+          // --- FIXED: Actually force the pump OFF in Firebase! ---
+          _dbRef.child('sink_monitor/isPumpOn').set(false);
+
+          _notificationService.showWarningNotification(
+            '⚠️ High Water Alert!',
+            'The sink is at ${currentLevel.toInt()}% capacity. The pump has been auto-disabled.',
+          );
+          _hasAlerted = true;
+        }
+        else if (currentLevel < 80) {
+          _hasAlerted = false;
+        }
+      }
     });
 
     _dbRef.child('sink_monitor/phValue').onValue.listen((event) {
@@ -91,7 +121,17 @@ class _DashboardTabState extends State<DashboardTab> {
 
   void _toggleHardwarePower() {
     if (isAppConnected) {
-      // The button ONLY changes the state now. The listener above handles the logging.
+      // --- ADDED: Safety check to prevent turning on if water is already too high ---
+      if (!isSystemOn && waterLevel != null && waterLevel! >= 90) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Cannot open faucet: Water level is critically high!'),
+              backgroundColor: Colors.red,
+            )
+        );
+        return; // Stops the code here so the database write never happens
+      }
+
       _dbRef.child('sink_monitor/isPumpOn').set(!isSystemOn).catchError((error) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Firebase Error: $error')));
       });
